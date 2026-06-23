@@ -63,38 +63,50 @@ namespace Monobelisk
                 originalHeightmapBuffer[i] = original[i];
             }
 
-            var alteredHeights = new ComputeBuffer(original.Length, sizeof(float));
+            ComputeBuffer alteredHeights = null;
+            ComputeShader cs = null;
 
-            var cs = UnityEngine.Object.Instantiate(InterestingTerrains.mainHeightComputer);
-            var k = cs.FindKernel("CSMain");
+            try
+            {
+                alteredHeights = new ComputeBuffer(original.Length, sizeof(float));
+                cs = UnityEngine.Object.Instantiate(InterestingTerrains.mainHeightComputer);
+                var k = cs.FindKernel("CSMain");
 
-            cs.SetFloat("newHeight", Constants.TERRAIN_HEIGHT);
-            cs.SetFloat("maxTerrainHeight", 2308.5f);
-            cs.SetFloat("scaledOceanElevation", 27.2f);
-            cs.SetFloat("baseHeightScale", 8f);
-            cs.SetFloat("noiseMapScale", 4f);
-            cs.SetFloat("extraNoiseScale", 10f);
-            cs.SetVector("terrainSize", new Vector2(WoodsFile.MapWidth, WoodsFile.MapHeight));
-            cs.SetVector("terrainPosition", Vector2.zero);
-            cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
-            cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
-            cs.SetBuffer(k, "Result", alteredHeights);
-            InterestingTerrains.instance.csParams.ApplyToCS(cs);
+                cs.SetFloat("newHeight", Constants.TERRAIN_HEIGHT);
+                cs.SetFloat("maxTerrainHeight", 2308.5f);
+                cs.SetFloat("scaledOceanElevation", 27.2f);
+                cs.SetFloat("baseHeightScale", 8f);
+                cs.SetFloat("noiseMapScale", 4f);
+                cs.SetFloat("extraNoiseScale", 10f);
+                cs.SetVector("terrainSize", new Vector2(WoodsFile.MapWidth, WoodsFile.MapHeight));
+                cs.SetVector("terrainPosition", Vector2.zero);
+                cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
+                cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
+                cs.SetBuffer(k, "Result", alteredHeights);
+                InterestingTerrains.instance.csParams.ApplyToCS(cs);
 
-            cs.Dispatch(k, WoodsFile.MapWidth / 10, WoodsFile.MapHeight / 5, 1);
+                cs.Dispatch(k, WoodsFile.MapWidth / 10, WoodsFile.MapHeight / 5, 1);
 
-            var floatHeights = new float[original.Length];
-            alteredHeights.GetData(floatHeights);
+                var floatHeights = new float[original.Length];
+                alteredHeights.GetData(floatHeights);
 
-            alteredHeightmapBuffer = Utility.ToBytes(floatHeights);
-            woodsFile.Buffer = alteredHeightmapBuffer;
+                alteredHeightmapBuffer = Utility.ToBytes(floatHeights);
+                woodsFile.Buffer = alteredHeightmapBuffer;
 
-            baseHeightmap = new Texture2D(WoodsFile.MapWidth, WoodsFile.MapHeight, TextureFormat.ARGB32, false, true);
-            baseHeightmap.SetPixels32(ToBasemap(alteredHeightmapBuffer));
-            baseHeightmap.Apply();
+                baseHeightmap = new Texture2D(WoodsFile.MapWidth, WoodsFile.MapHeight, TextureFormat.ARGB32, false, true);
+                baseHeightmap.SetPixels32(ToBasemap(alteredHeightmapBuffer));
+                baseHeightmap.Apply();
+            }
+            finally
+            {
+                if (alteredHeights != null)
+                {
+                    alteredHeights.Release();
+                    alteredHeights.Dispose();
+                }
 
-            alteredHeights.Release();
-            alteredHeights.Dispose();
+                DestroyComputeShaderInstance(cs);
+            }
         }
 
         public static void Cleanup()
@@ -106,101 +118,132 @@ namespace Monobelisk
         public void DispatchAndProcess(ComputeShader csPrototype, ref MapPixelData mapData, TerrainComputerParams csParams)
         {
             var woodsFile = DaggerfallUnity.Instance.ContentReader.WoodsFileReader;
-            var cs = UnityEngine.Object.Instantiate(csPrototype);
-            var k = cs.FindKernel("TerrainComputer");
-            uint _x, _y, _z;
-            cs.GetKernelThreadGroupSizes(k, out _x, out _y, out _z);
+            ComputeShader cs = null;
+            bool buffersDisposed = false;
 
-            int res = heightmapResolution + 1;
-
-            DaggerfallUnity dfUnity;
-            DaggerfallUnity.FindDaggerfallUnity(out dfUnity);
-            int searchSize = 16;
-            var locations = new List<Rect>();
-
-            int x, y;
-
-            for (x = -searchSize; x <= searchSize; x++)
+            try
             {
-                for (y = -searchSize; y <= searchSize; y++)
+                cs = UnityEngine.Object.Instantiate(csPrototype);
+                var k = cs.FindKernel("TerrainComputer");
+                uint _x, _y, _z;
+                cs.GetKernelThreadGroupSizes(k, out _x, out _y, out _z);
+
+                int res = heightmapResolution + 1;
+
+                DaggerfallUnity dfUnity;
+                DaggerfallUnity.FindDaggerfallUnity(out dfUnity);
+                int searchSize = 16;
+                var locations = new List<Rect>();
+
+                int x, y;
+
+                for (x = -searchSize; x <= searchSize; x++)
                 {
-                    var mpx = mapData.mapPixelX + x;
-                    var mpy = mapData.mapPixelY + y;
-                    var key = new DoubleInt() { Item1 = mpx, Item2 = mpy };
-
-                    if (locationRectCache.ContainsKey(key))
+                    for (y = -searchSize; y <= searchSize; y++)
                     {
-                        locations.Add(locationRectCache[key]);
-                        continue;
+                        var mpx = mapData.mapPixelX + x;
+                        var mpy = mapData.mapPixelY + y;
+                        var key = new DoubleInt() { Item1 = mpx, Item2 = mpy };
+
+                        if (locationRectCache.ContainsKey(key))
+                        {
+                            locations.Add(locationRectCache[key]);
+                            continue;
+                        }
+
+                        var mapPixelPos = new DFPosition(mpx, mpy);
+                        var mapPixelData = TerrainHelper.GetMapPixelData(dfUnity.ContentReader, mpx, mpy);
+
+                        if (!mapPixelData.hasLocation)
+                        {
+                            continue;
+                        }
+
+                        var location = dfUnity.ContentReader.MapFileReader.GetLocation(mapPixelData.mapRegionIndex, mapPixelData.mapLocationIndex);
+
+                        var locationRect = GetLocationRect(location);
+                        if (locationRect.width == 0 || locationRect.height == 0)
+                        {
+                            continue;
+                        }
+                        locationRect = ExpandInEachDirection(locationRect, 1);
+
+                        locationRectCache.Add(key, locationRect);
+                        locations.Add(locationRect);
                     }
-
-                    var mapPixelPos = new DFPosition(mpx, mpy);
-                    var mapPixelData = TerrainHelper.GetMapPixelData(dfUnity.ContentReader, mpx, mpy);
-
-                    if (!mapPixelData.hasLocation)
-                    {
-                        continue;
-                    }
-
-                    var location = dfUnity.ContentReader.MapFileReader.GetLocation(mapPixelData.mapRegionIndex, mapPixelData.mapLocationIndex);
-
-                    var locationRect = GetLocationRect(location);
-                    if (locationRect.width == 0 || locationRect.height == 0)
-                    {
-                        continue;
-                    }
-                    locationRect = ExpandInEachDirection(locationRect, 1);
-
-                    locationRectCache.Add(key, locationRect);
-                    locations.Add(locationRect);
                 }
+
+                x = (int)_x;
+                y = (int)_y;
+
+                cs.SetVector("terrainPosition", terrainPosition);
+                cs.SetVector("terrainSize", terrainSize);
+                cs.SetInt("heightmapResolution", heightmapResolution);
+                cs.SetVector("locationPosition", locationRect.min);
+                cs.SetVector("locationSize", locationRect.size);
+                cs.SetVectorArray("locationPositions", locations.Select(r => new Vector4(r.min.x, r.min.y)).ToArray());
+                cs.SetVectorArray("locationSizes", locations.Select(r => new Vector4(r.size.x, r.size.y)).ToArray());
+                cs.SetInt("locationCount", locations.Count);
+                cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
+                cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
+                cs.SetTexture(k, "PortMap", InterestingTerrains.portMap);
+                cs.SetTexture(k, "RoadMap", InterestingTerrains.roadMap);
+                cs.SetTexture(k, "tileableNoise", InterestingTerrains.tileableNoise);
+                cs.SetFloat("newHeight", Constants.TERRAIN_HEIGHT);
+                cs.SetTexture(k, "mapPixelHeights", baseHeightmap);
+                cs.SetBuffer(k, "heightmapBuffer", heightmapBuffers.heightmapBuffer);
+                cs.SetBuffer(k, "rawNoise", heightmapBuffers.rawNoise);
+                cs.SetBuffer(k, "locationHeightData", locationHeightData);
+                cs.SetVector("worldSize", Utility.GetWorldVertexSize());
+
+                var rd = Compatibility.BasicRoadsUtils.GetRoadData(mapData.mapPixelX, mapData.mapPixelY);
+                cs.SetVectorArray("NW_NE_SW_SE", rd.NW_NE_SW_SE);
+                cs.SetVectorArray("N_E_S_W", rd.N_E_S_W);
+
+                csParams.ApplyToCS(cs);
+
+                woodsFile.Buffer = originalHeightmapBuffer;
+                HandleBaseMapSampleParams(ref mapData, ref cs, k);
+                woodsFile.Buffer = alteredHeightmapBuffer;
+
+                cs.Dispatch(k, res / x, res / y, 1);
+
+                k = cs.FindKernel("TilemapComputer");
+                cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
+                cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
+                cs.SetBuffer(k, "heightmapBuffer", heightmapBuffers.heightmapBuffer);
+                cs.SetBuffer(k, "tilemapData", heightmapBuffers.tilemapData);
+                cs.SetBuffer(k, "rawNoise", heightmapBuffers.rawNoise);
+
+                cs.Dispatch(k, res / x, res / y, 1);
+
+                BufferIO.ProcessBufferValuesAndDispose(heightmapBuffers, ref mapData);
+                buffersDisposed = true;
             }
+            finally
+            {
+                woodsFile.Buffer = alteredHeightmapBuffer;
 
-            x = (int)_x;
-            y = (int)_y;
+                if (!buffersDisposed)
+                    heightmapBuffers.Dispose();
 
-            cs.SetVector("terrainPosition", terrainPosition);
-            cs.SetVector("terrainSize", terrainSize);
-            cs.SetInt("heightmapResolution", heightmapResolution);
-            cs.SetVector("locationPosition", locationRect.min);
-            cs.SetVector("locationSize", locationRect.size);
-            cs.SetVectorArray("locationPositions", locations.Select(r => new Vector4(r.min.x, r.min.y)).ToArray());
-            cs.SetVectorArray("locationSizes", locations.Select(r => new Vector4(r.size.x, r.size.y)).ToArray());
-            cs.SetInt("locationCount", locations.Count);
-            cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
-            cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
-            cs.SetTexture(k, "PortMap", InterestingTerrains.portMap);
-            cs.SetTexture(k, "RoadMap", InterestingTerrains.roadMap);
-            cs.SetTexture(k, "tileableNoise", InterestingTerrains.tileableNoise);
-            cs.SetFloat("newHeight", Constants.TERRAIN_HEIGHT);
-            cs.SetTexture(k, "mapPixelHeights", baseHeightmap);
-            cs.SetBuffer(k, "heightmapBuffer", heightmapBuffers.heightmapBuffer);
-            cs.SetBuffer(k, "rawNoise", heightmapBuffers.rawNoise);
-            cs.SetBuffer(k, "locationHeightData", locationHeightData);
-            cs.SetVector("worldSize", Utility.GetWorldVertexSize());
+                DestroyComputeShaderInstance(cs);
+            }
+        }
 
-            var rd = Compatibility.BasicRoadsUtils.GetRoadData(mapData.mapPixelX, mapData.mapPixelY);
-            cs.SetVectorArray("NW_NE_SW_SE", rd.NW_NE_SW_SE);
-            cs.SetVectorArray("N_E_S_W", rd.N_E_S_W);
+        private static void DestroyComputeShaderInstance(ComputeShader cs)
+        {
+            if (cs == null)
+                return;
 
-            csParams.ApplyToCS(cs);
-
-            woodsFile.Buffer = originalHeightmapBuffer;
-            HandleBaseMapSampleParams(ref mapData, ref cs, k);
-            woodsFile.Buffer = alteredHeightmapBuffer;
-
-            cs.Dispatch(k, res / x, res / y, 1);
-
-            k = cs.FindKernel("TilemapComputer");
-            cs.SetTexture(k, "BiomeMap", InterestingTerrains.biomeMap);
-            cs.SetTexture(k, "DerivMap", InterestingTerrains.derivMap);
-            cs.SetBuffer(k, "heightmapBuffer", heightmapBuffers.heightmapBuffer);
-            cs.SetBuffer(k, "tilemapData", heightmapBuffers.tilemapData);
-            cs.SetBuffer(k, "rawNoise", heightmapBuffers.rawNoise);
-
-            cs.Dispatch(k, res / x, res / y, 1);
-
-            BufferIO.ProcessBufferValuesAndDispose(heightmapBuffers, ref mapData);
+#if UNITY_EDITOR
+            if (!Application.isPlaying)
+                UnityEngine.Object.DestroyImmediate(cs);
+            else
+                UnityEngine.Object.Destroy(cs);
+#else
+            UnityEngine.Object.Destroy(cs);
+#endif
         }
 
         private static Color32[] ToBasemap(byte[] heightBuffer)

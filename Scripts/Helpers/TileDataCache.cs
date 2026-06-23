@@ -34,12 +34,26 @@ namespace Monobelisk
 
         /// <summary>
         /// Store tileData for a map pixel for use in TerrainTexturer.
+        /// Uses indexer assignment so a re-promotion of the same tile (which
+        /// DFU's StreamingWorld can issue after save-load or floating-origin
+        /// shifts) silently overwrites the stale entry instead of throwing
+        /// ArgumentException: An item with the same key has already been added.
         /// </summary>
         /// <param name="pos"></param>
         /// <param name="tileData"></param>
         public void Add(DFPosition pos, byte[] tileData)
         {
-            tileDataCache.Add(PositionKey(pos.X, pos.Y), tileData);
+            tileDataCache[PositionKey(pos.X, pos.Y)] = tileData;
+        }
+
+        /// <summary>
+        /// Empty the cache. Useful for offline tools (e.g. distance-field
+        /// bakers) that drive ScheduleGenerateSamplesJob across the whole
+        /// world map without going through the normal TerrainTexturer drain.
+        /// </summary>
+        public void Clear()
+        {
+            tileDataCache.Clear();
         }
 
         /// <summary>
